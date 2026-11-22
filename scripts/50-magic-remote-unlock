@@ -1,13 +1,22 @@
 #!/bin/sh
-# Allow older LG Magic Remotes (e.g. MR20) to pair with 2025+ webOS TVs.
+# Allow older LG Magic Remotes (e.g. MR19, MR20) to pair with newer webOS TVs.
 #
 # Why: lginput2 (the Magic Remote service, com.webos.service.mrcu) keeps a table
 # of known remote names with a model year and rejects any remote older than the
 # TV's "support start year" ("This remote is not supported by this TV.").
-# This script copies the TV's own lginput2 to /tmp, raises the year of the
-# older remotes in that copy, bind-mounts the copy over /usr/sbin/lginput2
-# and restarts the service. Nothing on the read-only system partition is
-# modified; a reboot (or `umount /usr/sbin/lginput2`) restores stock behaviour.
+# The script copies the TV's own lginput2 to /tmp, patches it, bind-mounts
+# the copy over /usr/sbin/lginput2 and restarts the service. Nothing on the
+# read-only system partition is modified; a reboot (or `umount /usr/sbin/lginput2`)
+# restores stock behaviour.
+#
+# Supported platforms & remotes:
+# - webOS 23+ (Python 3): raises the model year of older remotes in lginput2's
+#   remote table (e.g. MR20 on 2025+ TVs).
+# - webOS 5/6 (Python 2.7+): patches compatibility check symbols in lginput2 via
+#   ELF symbol lookup (tested on webOS TV 6.6.0 with AN-MR19BA).
+# - Note for webOS 6 UI users: if the "Elevate" button is missing in Homebrew
+#   Channel, elevate the service manually over SSH:
+#   /media/developer/apps/usr/palm/services/org.webosbrew.hbchannel.service/elevate-service io.github.dinohusejnovic.magicremoteunlock.service
 #
 # Install to /var/lib/webosbrew/init.d/ (Homebrew Channel runs it at boot).
 # Every Bluetooth Magic Remote model older than the TV's newest supported year
@@ -25,8 +34,14 @@ MODE="$1"   # "--reapply": drop the current patch and apply again (used when the
 
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
+find_python() {
+    command -v python3 2>/dev/null || command -v python 2>/dev/null
+}
+
 patcher() {
-    python3 - "$1" "$2" "$3" <<'PY'
+    PY_BIN="$(find_python)"
+    [ -n "$PY_BIN" ] || { echo "python/python3 not found"; return 1; }
+    "$PY_BIN" - "$1" "$2" "$3" <<'PY'
 import struct, sys
 src, dst, no_pointer = sys.argv[1:4]
 d = bytearray(open(src, 'rb').read())
@@ -63,6 +78,23 @@ def entry_name(e):
     name = bytes(d[o:end])
     return name.decode('latin1') if name[:4] in (b'LGE ', b'WEE ') else None
 
+def dynsym(name):
+    shoff, = struct.unpack_from('<I', d, 0x20)
+    shentsize, shnum = struct.unpack_from('<HH', d, 0x2e)
+    for want_type in (11, 2):  # SHT_DYNSYM (11) or SHT_SYMTAB (2)
+        for i in range(shnum):
+            sh = shoff + i * shentsize
+            _, typ, _, _, off, size, link, _, _, entsize = struct.unpack_from('<10I', d, sh)
+            if typ != want_type:
+                continue
+            stroff = struct.unpack_from('<10I', d, shoff + link * shentsize)[4]
+            for o in range(off, off + size, entsize or 16):
+                n, value, _, info, _, _ = struct.unpack_from('<IIIBBH', d, o)
+                e = d.find(b'\0', stroff + n)
+                if bytes(d[stroff + n:e]) == name.encode() and value:
+                    return v2o(value & ~1)
+
+
 # Anchor on a known remote entry, then walk the whole table around it. MR20 first; the others
 # are fallbacks in case a newer firmware drops that entry.
 ANCHOR_NAMES = ['LGE MR20', 'LGE MR21', 'LGE MR19', 'LGE MR22', 'LGE MR23', 'LGE MR24', 'LGE MR25GA']
@@ -80,49 +112,47 @@ for anchor_name in ANCHOR_NAMES:
                     anchors.append(o - 0xc)
     if len(anchors) == 1:
         break
-if len(anchors) != 1:
-    sys.exit("SKIP: remote table not found (firmware layout changed?)")
-first = anchors[0]
-while entry_name(first - STRIDE):
-    first -= STRIDE
-entries, e = [], first
-while entry_name(e):
-    entries.append(e); e += STRIDE
-new_year = max(u32(e + 0x14) for e in entries)
-print("remote table: %d entries, newest year %d (anchor %s)" % (len(entries), new_year, anchor_name))
 
-changed = 0
-for e in entries:
-    name, year = entry_name(e), u32(e + 0x14)
-    # Only Bluetooth Magic Remote style entries (kind 1, type 0). Leave the legacy RF remotes
-    # (kind 0), the IR blaster (type 4) and Fire TV remotes alone.
-    if year >= new_year or u32(e) != 1 or u32(e + 4) != 0 or 'FTV' in name:
-        continue
-    struct.pack_into('<I', d, e + 0x14, new_year)
-    changed += 1
-    print("%-12s %d -> %d" % (name, year, new_year))
-if not changed:
-    sys.exit("nothing to patch")
+if len(anchors) == 1:
+    first, = anchors
+    while entry_name(first - STRIDE):
+        first -= STRIDE
+    entries, e = [], first
+    while entry_name(e):
+        entries.append(e); e += STRIDE
+    new_year = max(u32(e + 0x14) for e in entries)
+    print("remote table: %d entries, newest year %d (anchor %s)" % (len(entries), new_year, anchor_name))
+    changed = 0
+    for e in entries:
+        name, year = entry_name(e), u32(e + 0x14)
+        if year >= new_year or u32(e) != 1 or u32(e + 4) != 0 or 'FTV' in name:
+            continue
+        struct.pack_into('<I', d, e + 0x14, new_year)
+        changed += 1
+        print("%-12s %d -> %d" % (name, year, new_year))
+    if not changed:
+        sys.exit("nothing to patch")
+else:
+    # Fallback for webOS 5/6: patch compatibility check functions in .text
+    checks = [
+        ('xpa_wbs_isSupportedRemocon',      b'\x01\x20\x70\x47', 'return 1'),
+        ('xpa_wbs_isLegacyRemote',          b'\x00\x20\x70\x47', 'return 0'),
+        ('lginput_util_remote_isSupported', b'\x01\x20\x70\x47', 'return 1'),
+    ]
+    patched = 0
+    for sym, code, desc in checks:
+        off = dynsym(sym)
+        if off is not None and (d[off + 1] == 0xb5 or (d[off] == 0x2d and d[off + 1] == 0xe9)):
+            d[off:off + 4] = code
+            patched += 1
+            print("symbol %-32s @ 0x%x -> %s" % (sym, off, desc))
+    if patched < 2:
+        sys.exit("SKIP: remote table and legacy check symbols not found")
 
 # ---- optional: disable the pointer (keep Bluetooth, D-pad and buttons) --------------------
 # send_position / send_wheel become "return 0". In send_custom_event, the cursor-on event
 # (id 4) is made to take the cursor-off (id 5) path, so menus fall back to D-pad navigation.
 u16 = lambda o: struct.unpack_from('<H', d, o)[0]
-
-def dynsym(name):
-    shoff, = struct.unpack_from('<I', d, 0x20)
-    shentsize, shnum = struct.unpack_from('<HH', d, 0x2e)
-    for i in range(shnum):
-        sh = shoff + i * shentsize
-        _, typ, _, _, off, size, link, _, _, entsize = struct.unpack_from('<10I', d, sh)
-        if typ != 11:  # SHT_DYNSYM
-            continue
-        stroff = struct.unpack_from('<10I', d, shoff + link * shentsize)[4]
-        for o in range(off, off + size, entsize or 16):
-            n, value, _, info, _, _ = struct.unpack_from('<IIIBBH', d, o)
-            e = d.find(b'\0', stroff + n)
-            if bytes(d[stroff + n:e]) == name.encode() and value:
-                return v2o(value & ~1)
 
 def patch_pointer():
     pos = dynsym('lginput_uinput_send_position')
@@ -179,7 +209,7 @@ run() {
         log "removed previous patch"
     fi
     NOPOINTER=0; [ -e "$NOPOINTER_FLAG" ] && NOPOINTER=1
-    command -v python3 >/dev/null 2>&1 || { log "python3 not found, aborting"; return 1; }
+	[ -n "$(find_python)" ] || { log "python/python3 not found, aborting"; return 1; }
 
     # wait (max 3 min) for the stock binary to be readable
     n=0; while [ ! -r "$TARGET" ] && [ $n -lt 90 ]; do sleep 2; n=$((n+1)); done
