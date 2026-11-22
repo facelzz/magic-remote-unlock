@@ -17,7 +17,8 @@
         "ipkHash": {
           "sha256": "e2dd529baae91468ea2ecfe465c158fbd7f97b72fc20b6e00eca7d0f6ab53465"
         }
-      }
+      },
+      "rootRequired": true
     }
   ]
 }
