@@ -27,8 +27,8 @@ At boot it copies the TV's own `lginput2` to `/tmp`, raises the year of every ol
 
 ## Install
 
-You need a rooted TV with the [Homebrew Channel](https://www.webosbrew.org/) installed. The
-patch script needs `python3`, which webOS 10 has.
+You need a rooted TV with the Homebrew Channel installed. The patch script supports
+both `python3` (newer webOS) and `python` 2.7 (shipped out of the box on webOS 5/6).
 
 **Through the Homebrew Channel.** Add this project's repository:
 
@@ -55,6 +55,14 @@ Then pair the remote. It can't be connected to another device at the time (forge
 first). Point it at the TV and hold Home + Back for about five seconds, or hold the wheel. The
 TV keeps one Magic Remote at a time, so pairing the MR20 replaces the one that came with it.
 Pair that one again later the usual way if you want it back.
+
+### webOS 5 / 6 Notes
+
+* **Legacy compatibility fallback:** On older webOS versions where `lginput2` does not use a model-year table (tested on **webOS TV 6.6.0** with **AN-MR19BA**), the script automatically falls back to patching the compatibility check functions (`xpa_wbs_isSupportedRemocon`, `xpa_wbs_isLegacyRemote`, and `lginput_util_remote_isSupported`) via ELF symbol lookup.
+* **Service elevation (webOS 5/6):** After installing the app via Homebrew Channel, elevate the service manually over SSH so it has root permissions to mount `lginput2`:
+  ```sh
+  /media/developer/apps/usr/palm/services/org.webosbrew.hbchannel.service/elevate-service io.github.dinohusejnovic.magicremoteunlock.service
+  ```
 
 ## Uninstall
 
