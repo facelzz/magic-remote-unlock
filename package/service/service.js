@@ -16,6 +16,8 @@ const MRCU_INFO = '/mnt/lg/cmn_data/mrcu/mrcu1.info';
 
 const isRoot = () => typeof process.getuid === 'function' && process.getuid() === 0;
 const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch (e) { return ''; } };
+//  fs.rmSync() is missing on older systems
+const removeFile = (f) => { try { fs.unlinkSync(f); } catch (e) { /* ignore if missing */ } };
 
 function status() {
   const mrcu = read(MRCU_INFO);
@@ -36,9 +38,11 @@ function fail(message, text, code) {
 }
 
 function installScript() {
-  fs.mkdirSync(INIT_DIR, { recursive: true });
-  fs.copyFileSync(SCRIPT_SRC, SCRIPT_DST);
-  fs.chmodSync(SCRIPT_DST, 0o755);
+	if (!fs.existsSync(INIT_DIR)) {
+    	fs.mkdirSync(INIT_DIR, { recursive: true });
+	}
+  	fs.copyFileSync(SCRIPT_SRC, SCRIPT_DST);
+  	fs.chmodSync(SCRIPT_DST, 0o755);
 }
 
 // After an app update the boot script in init.d would otherwise stay the old version until
@@ -70,7 +74,7 @@ service.register('setPointer', (message) => {
   const disable = !(message.payload && message.payload.enabled);
   try {
     if (disable) fs.writeFileSync(NOPOINTER_FLAG, '');
-    else fs.rmSync(NOPOINTER_FLAG, { force: true });
+    else removeFile(NOPOINTER_FLAG);
     if (fs.existsSync(SCRIPT_DST)) {
       installScript();  // make sure the boot copy is the packaged (current) version
       cp.spawn(SCRIPT_DST, ['--reapply'], { detached: true, stdio: 'ignore' }).unref();
@@ -84,7 +88,7 @@ service.register('setPointer', (message) => {
 service.register('disable', (message) => {
   if (!isRoot()) return fail(message, 'Service is not running as root', 1);
   try {
-    fs.rmSync(SCRIPT_DST, { force: true });
+    removeFile(SCRIPT_DST);
   } catch (e) {
     return fail(message, String(e), 2);
   }
